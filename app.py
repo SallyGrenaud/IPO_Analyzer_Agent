@@ -137,7 +137,8 @@ with st.sidebar:
                             st.stop()
         
                         splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
-                        
+
+                        print(splits)
                         # 3. FIXED: Explicitly pass the key with the 'Bearer' requirement context
                         # OpenRouter requires this exact setup
                         embeddings = OpenAIEmbeddings(
@@ -147,6 +148,8 @@ with st.sidebar:
                             # Some versions of LangChain need this to force the correct header
                             default_headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"}
                         )
+
+                        print(embeddings)
                         
                         vectorstore = Chroma.from_documents(
                             documents=splits, 
@@ -159,6 +162,7 @@ with st.sidebar:
                     except Exception as e:
                         # Catching the 401 specifically
                         if "401" in str(e):
+                            print(e)
                             st.error("🔑 OpenRouter Authentication Failed: Check if your API Key is valid and has credits.")
                         else:
                             st.error(f"Error: {e}")
