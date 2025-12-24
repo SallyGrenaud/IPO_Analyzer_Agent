@@ -15,36 +15,59 @@ st.set_page_config(page_title="IPO Analyst Agent", layout="wide")
 
 # 2. SEBI SCRAPER (Landing Page Aware)
 def get_sebi_drhp_list():
-    """Scrapes the SEBI listing page and resolves actual PDF links from landing pages."""
+    """Scrapes SEBI listing page and resolves actual PDF links from landing pages."""
+    # Correct URL for the Public Issues listing
     url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10"
     headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    # "Console logging" for the app UI
+    log_placeholder = st.empty()
     
     try:
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.content, 'html.parser')
         links = []
         
+        # Log basic scraping start to console/terminal
+        print(f"Scraping started at: {url}")
+        
         # Target table rows from SEBI's 'Public Issues' table
         rows = soup.find_all('tr')
         for row in rows:
+            # SEBI uses 'points' class for the document titles
             a_tag = row.find('a', class_='points')
             if a_tag and "drhp" in a_tag.text.lower():
                 title = a_tag.text.strip()
                 landing_page = a_tag['href']
                 
-                # SEBI PDFs are inside a landing page; we must find the direct .pdf link
+                # Resolving the landing page to get the actual PDF
                 lp_res = requests.get(landing_page, headers=headers)
                 lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
+                
+                # Find the direct .pdf link on the filing page
                 pdf_tag = lp_soup.find('a', href=lambda x: x and x.endswith('.pdf'))
                 
                 if pdf_tag:
                     pdf_url = pdf_tag['href']
                     if not pdf_url.startswith('http'):
                         pdf_url = f"https://www.sebi.gov.in{pdf_url}"
+                    
+                    # Console.log equivalent for terminal
+                    print(f"FOUND: {title} -> {pdf_url}")
+                    
                     links.append({"title": title, "url": pdf_url})
+            
             if len(links) >= 5: break
+            
+        # UI "Console log" results
+        if links:
+            log_placeholder.success(f"Scrapped {len(links)} IPOs successfully. Check your terminal for details.")
+        else:
+            log_placeholder.warning("No IPOs found. Ensure SEBI has recent DRHP filings.")
+            
         return links
     except Exception as e:
+        print(f"CRITICAL SCRAPING ERROR: {e}")
         st.error(f"Scraping Error: {e}")
         return []
 
