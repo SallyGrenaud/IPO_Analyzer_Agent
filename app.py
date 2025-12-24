@@ -6,6 +6,8 @@ from typing_extensions import TypedDict
 from llama_parse import LlamaParse
 from langchain_text_splitters import RecursiveCharacterTextSplitter 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langgraph.graph import StateGraph, END, START
 
