@@ -10,7 +10,7 @@ from langchain_community.vectorstores import Chroma
 from langgraph.graph import StateGraph, END, START
 
 # 1. INITIAL SETUP
-nest_asyncio.apply()
+# nest_asyncio.apply()
 st.set_page_config(page_title="IPO Analyst Agent", layout="wide")
 
 # Sidebar for API Keys & Auto-Fetch
