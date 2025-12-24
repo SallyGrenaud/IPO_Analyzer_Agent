@@ -8,5 +8,6 @@ langchain-text-splitters
 langchain-community
 beautifulsoup4
 requests
-ChatGroq
-HuggingFaceEmbeddings
+langchain-groq 
+sentence-transformers
+langchain_huggingface
