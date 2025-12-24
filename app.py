@@ -1,5 +1,5 @@
 import streamlit as st
-import os, requests, asyncio, fitz  # fitz is PyMuPDF
+import os, requests, asyncio, fitz
 from bs4 import BeautifulSoup
 from typing import List
 from typing_extensions import TypedDict
@@ -11,10 +11,11 @@ from langchain_community.vectorstores import Chroma
 from langgraph.graph import StateGraph, END, START
 
 # 1. PAGE CONFIGURATION
-st.set_page_config(page_title="IPO Analyst Agent", layout="wide", page_icon="📈")
-st.title("📈 Indian IPO Analyst Pro (Resilient Edition)")
+st.set_page_config(page_title="IPO Analyst Pro", layout="wide", page_icon="📈")
+st.title("📈 Indian IPO Analyst Agent")
+st.caption("Automated SEBI Scraper + Persistent RAG + Groq Llama 3.3")
 
-# 2. SEBI SCRAPER
+# 2. SEBI SCRAPER (No Limit + Landing Page Logic)
 def get_sebi_drhp_list():
     url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -22,33 +23,17 @@ def get_sebi_drhp_list():
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.content, 'html.parser')
         links = []
-        rows = soup.find_all('tr', {'role': 'row'})
+        rows = soup.find_all('tr')
         for row in rows:
             a_tag = row.find('a', class_='points')
             if a_tag and "drhp" in a_tag.text.lower():
-                title = a_tag.text.strip()
-                landing_page = a_tag['href']
-                lp_res = requests.get(landing_page, headers=headers)
-                lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
-                iframe = lp_soup.find('iframe')
-                pdf_url = None
-                if iframe and 'src' in iframe.attrs:
-                    src = iframe['src']
-                    pdf_url = src.split('file=')[-1] if 'file=' in src else src
-                if not pdf_url:
-                    pdf_tag = lp_soup.find('a', href=lambda x: x and x.endswith('.pdf'))
-                    pdf_url = pdf_tag['href'] if pdf_tag else None
-                if pdf_url:
-                    if not pdf_url.startswith('http'):
-                        pdf_url = f"https://www.sebi.gov.in{pdf_url}"
-                    links.append({"title": title, "url": pdf_url})
-            if len(links) >= 5: break
+                links.append({"title": a_tag.text.strip(), "url": a_tag['href']})
         return links
     except Exception as e:
         st.error(f"Scraping Error: {e}")
         return []
 
-# 3. AGENTIC ENGINE
+# 3. AGENTIC ENGINE (Self-Correction Loop)
 class AgentState(TypedDict):
     question: str
     documents: List[str]
@@ -63,21 +48,28 @@ def retrieve_node(state):
 
 def grade_node(state):
     llm = get_llm()
-    doc_txt = "\n".join([d.page_content for d in state["documents"]])
-    # Change: Ask if the context provides financial data to evaluate an IPO
+    doc_txt = "\n".join([d.page_content[:1000] for d in state["documents"]])
+    # More lenient grader to avoid "Context not relevant"
     prompt = f"""
+    Is the following context useful for answering a financial or business question about an IPO?
+    Respond ONLY 'yes' or 'no'.
     Context: {doc_txt}
     Question: {state['question']}
-    Does the context provide financial or business information relevant to the company mentioned in the question? 
-    Respond ONLY 'yes' or 'no'.
     """
-    check = llm.invoke(prompt)
-    return {"relevance": "yes" if "yes" in check.content.lower() else "no"}
+    check = llm.invoke(prompt).content.lower()
+    return {"relevance": "yes" if "yes" in check else "no"}
 
 def generate_node(state):
     llm = get_llm()
     context = "\n\n".join([d.page_content for d in state["documents"]])
-    prompt = f"You are a Senior Financial Analyst. Answer accurately using context: {context}\n\nQuestion: {state['question']}"
+    prompt = f"""
+    You are a Senior IPO Financial Analyst. Use the context provided to answer the user's question.
+    Context: {context}
+    
+    If the user asks if they should 'apply', provide a data-driven summary of Pros and Cons.
+    Do not give direct financial advice.
+    Question: {state['question']}
+    """
     return {"generation": llm.invoke(prompt).content}
 
 workflow = StateGraph(AgentState)
@@ -90,11 +82,11 @@ workflow.add_conditional_edges("grade", lambda x: "generate" if x["relevance"] =
 workflow.add_edge("generate", END)
 agent_app = workflow.compile()
 
-# 4. SIDEBAR & INGESTION
+# 4. SIDEBAR & CACHED INGESTION
 with st.sidebar:
     st.header("⚙️ Configuration")
     groq_key = st.text_input("Groq API Key", type="password")
-    llama_key = st.text_input("LlamaCloud API Key (Optional)", type="password", help="If empty, local extraction will be used.")
+    llama_key = st.text_input("LlamaCloud API Key (Optional)", type="password")
     
     if groq_key:
         os.environ["GROQ_API_KEY"] = groq_key
@@ -106,78 +98,73 @@ with st.sidebar:
     
     if "ipo_links" in st.session_state and st.session_state.ipo_links:
         selected = st.selectbox("Select IPO", options=[i['title'] for i in st.session_state.ipo_links])
-        if st.button("Ingest IPO Data"):
+        
+        if st.button("Ingest & Analyze"):
             target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
-            text_content = ""
+            cache_dir = f"./cache_{selected.replace(' ', '_')[:15]}"
             
-            # Use a status container for a professional loading experience
             with st.status(f"Processing {selected}...", expanded=True) as status:
-                
-                # --- STEP 1: DOWNLOAD ---
-                status.write("📥 Fetching PDF from SEBI servers...")
-                try:
-                    response = requests.get(target['url'], timeout=30)
-                    response.raise_for_status()
-                    with open("temp.pdf", "wb") as f: 
-                        f.write(response.content)
-                except Exception as e:
-                    st.error(f"Download failed: {e}")
-                    st.stop()
-
-                # --- STEP 2: EXTRACTION ---
-                if llama_key:
-                    try:
-                        status.write("🔍 Parsing with LlamaParse (High Accuracy)...")
-                        os.environ["LLAMA_CLOUD_API_KEY"] = llama_key
-                        parser = LlamaParse(result_type="markdown")
-                        docs = parser.load_data("temp.pdf")
-                        text_content = "\n\n".join([d.text for d in docs])
-                    except Exception as e:
-                        status.write(f"⚠️ LlamaParse failed ({e}). Falling back to local...")
-
-                if not text_content:
-                    status.write("📄 Extracting text locally using PyMuPDF...")
-                    doc = fitz.open("temp.pdf")
-                    text_content = "\n".join([page.get_text() for page in doc])
-
-                # --- STEP 3: EMBEDDING & VECTOR DB ---
-                if text_content.strip():
-                    status.write("⚙️ Splitting text into chunks...")
-                    splits = RecursiveCharacterTextSplitter(
-                        chunk_size=1500, 
-                        chunk_overlap=150
-                    ).create_documents([text_content])
-                    
-                    status.write("🧠 Generating embeddings (HuggingFace)...")
+                # CHECK CACHE FIRST
+                if os.path.exists(cache_dir):
+                    status.write("🚀 Found in local cache. Loading...")
                     embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-                    
-                    status.write("💾 Finalizing Vector Database...")
-                    vectorstore = Chroma.from_documents(
-                        documents=splits, 
-                        embedding=embeddings
-                    )
-                    
+                    vectorstore = Chroma(persist_directory=cache_dir, embedding_function=embeddings)
                     st.session_state.retriever_obj = vectorstore.as_retriever()
-                    status.update(label="✅ Ingestion Complete!", state="complete", expanded=False)
-                    st.success(f"Successfully Ingested {selected}")
+                    status.update(label="✅ Loaded from Cache!", state="complete", expanded=False)
                 else:
-                    status.update(label="❌ Extraction Failed", state="error")
-                    st.error("Could not extract any text from the document.")
+                    # FETCH ACTUAL PDF LINK
+                    status.write("📥 Resolving PDF URL...")
+                    lp_res = requests.get(target['url'], headers={'User-Agent': 'Mozilla/5.0'})
+                    lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
+                    iframe = lp_soup.find('iframe')
+                    pdf_url = iframe['src'].split('file=')[-1] if iframe and 'src' in iframe.attrs else target['url']
+                    if not pdf_url.startswith('http'): pdf_url = f"https://www.sebi.gov.in{pdf_url}"
+                    
+                    # DOWNLOAD
+                    status.write("📂 Downloading PDF...")
+                    pdf_data = requests.get(pdf_url).content
+                    with open("temp.pdf", "wb") as f: f.write(pdf_data)
+
+                    # EXTRACTION
+                    text_content = ""
+                    if llama_key:
+                        try:
+                            status.write("🔍 Extracting with LlamaParse...")
+                            os.environ["LLAMA_CLOUD_API_KEY"] = llama_key
+                            docs = LlamaParse(result_type="markdown").load_data("temp.pdf")
+                            text_content = "\n\n".join([d.text for d in docs])
+                        except: status.write("⚠️ LlamaParse failed. Falling back...")
+
+                    if not text_content:
+                        status.write("📄 Local extraction with PyMuPDF...")
+                        doc = fitz.open("temp.pdf")
+                        text_content = "\n".join([page.get_text() for page in doc])
+
+                    # EMBEDDING & PERSISTENCE
+                    status.write("🧠 Building Vector Database...")
+                    splits = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=150).create_documents([text_content])
+                    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                    vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings, persist_directory=cache_dir)
+                    st.session_state.retriever_obj = vectorstore.as_retriever()
+                    status.update(label="✅ Analysis & Caching Complete!", state="complete", expanded=False)
+                
+            st.success(f"Successfully Ingested {selected}")
 
 # 5. CHAT INTERFACE
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask about debt, revenue, or risk factors..."):
+if prompt := st.chat_input("Ask about financials, risk, or 'should I apply?'"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
+    
     if "retriever_obj" in st.session_state:
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing..."):
+            with st.spinner("Analyzing DRHP..."):
                 result = agent_app.invoke({"question": prompt})
-                ans = result.get("generation", "Context not relevant.")
+                ans = result.get("generation", "Agent determined the retrieved data was irrelevant to this specific query.")
                 st.markdown(ans)
                 st.session_state.messages.append({"role": "assistant", "content": ans})
     else:
-        st.error("Please ingest an IPO first.")
+        st.error("Please select and ingest an IPO from the sidebar first.")
