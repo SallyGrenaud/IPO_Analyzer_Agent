@@ -104,33 +104,59 @@ with st.sidebar:
             target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
             text_content = ""
             
-            # --- LOGIC: LLAMAPARSE VS LOCAL FALLBACK ---
-            if llama_key:
+            # Use a status container for a professional loading experience
+            with st.status(f"Processing {selected}...", expanded=True) as status:
+                
+                # --- STEP 1: DOWNLOAD ---
+                status.write("📥 Fetching PDF from SEBI servers...")
                 try:
-                    with st.spinner("Using LlamaParse (High Accuracy)..."):
+                    response = requests.get(target['url'], timeout=30)
+                    response.raise_for_status()
+                    with open("temp.pdf", "wb") as f: 
+                        f.write(response.content)
+                except Exception as e:
+                    st.error(f"Download failed: {e}")
+                    st.stop()
+
+                # --- STEP 2: EXTRACTION ---
+                if llama_key:
+                    try:
+                        status.write("🔍 Parsing with LlamaParse (High Accuracy)...")
                         os.environ["LLAMA_CLOUD_API_KEY"] = llama_key
                         parser = LlamaParse(result_type="markdown")
-                        docs = parser.load_data(target['url'])
+                        docs = parser.load_data("temp.pdf")
                         text_content = "\n\n".join([d.text for d in docs])
-                except Exception as e:
-                    st.warning(f"LlamaParse failed. Switching to local extraction. Error: {e}")
+                    except Exception as e:
+                        status.write(f"⚠️ LlamaParse failed ({e}). Falling back to local...")
 
-            if not text_content:
-                with st.spinner("Using Local PyMuPDF Extraction..."):
-                    response = requests.get(target['url'])
-                    with open("temp.pdf", "wb") as f: f.write(response.content)
+                if not text_content:
+                    status.write("📄 Extracting text locally using PyMuPDF...")
                     doc = fitz.open("temp.pdf")
                     text_content = "\n".join([page.get_text() for page in doc])
 
-            # Process with Chroma
-            if text_content.strip():
-                splits = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=150).create_documents([text_content])
-                embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-                vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-                st.session_state.retriever_obj = vectorstore.as_retriever()
-                st.success(f"✅ Ingested {selected}")
-            else:
-                st.error("Failed to extract any text from the PDF.")
+                # --- STEP 3: EMBEDDING & VECTOR DB ---
+                if text_content.strip():
+                    status.write("⚙️ Splitting text into chunks...")
+                    splits = RecursiveCharacterTextSplitter(
+                        chunk_size=1500, 
+                        chunk_overlap=150
+                    ).create_documents([text_content])
+                    
+                    status.write("🧠 Generating embeddings (HuggingFace)...")
+                    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+                    
+                    status.write("💾 Finalizing Vector Database...")
+                    vectorstore = Chroma.from_documents(
+                        documents=splits, 
+                        embedding=embeddings
+                    )
+                    
+                    st.session_state.retriever_obj = vectorstore.as_retriever()
+                    status.update(label="✅ Ingestion Complete!", state="complete", expanded=False)
+                    st.success(f"Successfully Ingested {selected}")
+                else:
+                    status.update(label="❌ Extraction Failed", state="error")
+                    st.error("Could not extract any text from the document.")
 
 # 5. CHAT INTERFACE
 if "messages" not in st.session_state: st.session_state.messages = []
