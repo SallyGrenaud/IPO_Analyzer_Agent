@@ -1,0 +1,10 @@
+streamlit
+llama-parse
+langchain-openai
+langgraph
+chromadb
+nest_asyncio
+langchain-text-splitters
+langchain-community
+beautifulsoup4
+requests
