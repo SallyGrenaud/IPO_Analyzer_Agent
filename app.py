@@ -1,113 +1,68 @@
 import streamlit as st
-import os, requests, nest_asyncio
+import os, requests, asyncio
 from bs4 import BeautifulSoup
-from typing import List, Literal
+from typing import List
 from typing_extensions import TypedDict
 from llama_parse import LlamaParse
 from langchain_text_splitters import RecursiveCharacterTextSplitter 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langgraph.graph import StateGraph, END, START
-from urllib.parse import urljoin
 
-# 1. INITIAL SETUP
-# nest_asyncio.apply()
-st.set_page_config(page_title="IPO Analyst Agent", layout="wide")
+# 1. PAGE CONFIGURATION
+st.set_page_config(page_title="IPO Intel Agent", layout="wide", page_icon="📈")
+st.title("📈 Indian IPO Analyst Pro")
 
-# 2. SEBI SCRAPER (Landing Page Aware)
+# 2. FIXED SEBI SCRAPER (Landing Page & Iframe Aware)
 def get_sebi_drhp_list():
-    """Scrapes SEBI listing page and resolves actual PDF links from intermediate landing pages."""
+    """Scrapes the SEBI listing page and resolves actual PDF links from intermediate landing pages."""
     url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     
     try:
-        # Step 1: Get the main listing table
         res = requests.get(url, headers=headers)
         soup = BeautifulSoup(res.content, 'html.parser')
         links = []
         
-        print(f"--- Console Log: Scraping started at {url} ---")
+        print(f"\n--- CONSOLE: Scraping started at {url} ---") # Console.log for terminal
         
-        # Rows in the SEBI table
-        rows = soup.find_all('tr')
+        rows = soup.find_all('tr', {'role': 'row'})
         for row in rows:
             a_tag = row.find('a', class_='points')
             if a_tag and "drhp" in a_tag.text.lower():
                 title = a_tag.text.strip()
-                landing_page_url = a_tag['href']
+                landing_page = a_tag['href']
                 
-                # Step 2: Visit the landing page to find the embedded PDF
-                print(f"--- Console Log: Entering Landing Page: {title} ---")
-                lp_res = requests.get(landing_page_url, headers=headers)
+                # Step 2: Visit the landing page to extract the PDF link from the iframe
+                print(f"--- CONSOLE: Resolving landing page for: {title} ---")
+                lp_res = requests.get(landing_page, headers=headers)
                 lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
                 
-                # SEBI embeds the PDF in an iframe. We look for 'iframe' or 'a' tags
+                # SEBI usually puts the PDF inside an iframe src
                 iframe = lp_soup.find('iframe')
                 pdf_url = None
-                
                 if iframe and 'src' in iframe.attrs:
                     src = iframe['src']
-                    # Handle the common 'viewer.html?file=' format
-                    if 'file=' in src:
-                        pdf_url = src.split('file=')[-1]
-                    else:
-                        pdf_url = src
+                    pdf_url = src.split('file=')[-1] if 'file=' in src else src # Handle viewer.html?file=
                 
-                # Fallback: Look for any direct PDF link on the page
-                if not pdf_url:
+                if not pdf_url: # Fallback for direct links
                     pdf_tag = lp_soup.find('a', href=lambda x: x and x.endswith('.pdf'))
-                    if pdf_tag:
-                        pdf_url = pdf_tag['href']
+                    pdf_url = pdf_tag['href'] if pdf_tag else None
 
                 if pdf_url:
-                    # Clean the URL (handle relative paths)
                     if not pdf_url.startswith('http'):
                         pdf_url = f"https://www.sebi.gov.in{pdf_url}"
-                    
-                    print(f"--- Console Log: SUCCESS! PDF Link Extracted: {pdf_url} ---")
+                    print(f"--- CONSOLE: SUCCESS! Found PDF -> {pdf_url}")
                     links.append({"title": title, "url": pdf_url})
             
-            if len(links) >= 5: break # Limit for performance
-            
+            if len(links) >= 5: break
         return links
     except Exception as e:
-        print(f"--- Console Log: SCRAPING ERROR: {e} ---")
+        print(f"--- CONSOLE: SCRAPING ERROR: {e} ---")
         st.error(f"Scraping Error: {e}")
         return []
 
-# Sidebar for API Keys & Auto-Fetch
-with st.sidebar:
-    st.header("⚙️ Configuration")
-    openrouter_key = st.text_input("OpenRouter API Key", type="password")
-    llama_key = st.text_input("LlamaCloud API Key", type="password")
-    
-    if openrouter_key and llama_key:
-        os.environ["OPENROUTER_API_KEY"] = openrouter_key
-        os.environ["LLAMA_CLOUD_API_KEY"] = llama_key
-        st.success("API Keys Ready!")
-
-    st.divider()
-    st.header("📂 Auto-Fetch SEBI DRHPs")
-    
-    if st.button("Fetch Latest SEBI Filings"):
-        st.session_state.ipo_links = get_sebi_drhp_list()
-    
-    if "ipo_links" in st.session_state and st.session_state.ipo_links:
-        selected = st.selectbox("Select IPO", options=[i['title'] for i in st.session_state.ipo_links])
-        if st.button("Ingest IPO Data"):
-            target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
-            with st.spinner("LlamaParse is extracting financial tables..."):
-                parser = LlamaParse(result_type="markdown", user_prompt="Extract all financial tables precisely.")
-                docs = parser.load_data(target['url'])
-                splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
-                vectorstore = Chroma.from_documents(
-                    documents=splits, 
-                    embedding=OpenAIEmbeddings(model="openai/text-embedding-3-small", base_url="https://openrouter.ai/api/v1")
-                )
-                st.session_state.retriever = vectorstore.as_retriever()
-                st.success(f"Ingested {selected}")
-
-# 2. AGENTIC ENGINE (Self-Correction Loop)
+# 3. AGENTIC ENGINE (Self-Correction Loop)
 class AgentState(TypedDict):
     question: str
     documents: List[str]
@@ -115,20 +70,22 @@ class AgentState(TypedDict):
     generation: str
 
 def retrieve_node(state):
-    return {"documents": st.session_state.retriever_obj.invoke(state["question"])}
+    docs = st.session_state.retriever_obj.invoke(state["question"])
+    return {"documents": docs}
 
 def grade_node(state):
-    # LLM Grades the retrieved data to prevent hallucinations
+    """Corrective RAG: Grades retrieved data to filter noise."""
     llm = ChatOpenAI(model="google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1", openai_api_key=os.environ["OPENROUTER_API_KEY"])
-    doc_txt = "\n".join([d.page_content for d in state["documents"]])
-    check = llm.invoke(f"Does this context answer: '{state['question']}'? Reply ONLY 'yes' or 'no'. Context: {doc_txt}")
-    return {"relevance": "yes" if "yes" in check.content.lower() else "no"}
+    context = "\n".join([d.page_content for d in state["documents"]])
+    prompt = f"Does this context answer: '{state['question']}'? Reply ONLY 'yes' or 'no'. Context: {context}"
+    score = llm.invoke(prompt).content.lower()
+    return {"relevance": "yes" if "yes" in score else "no"}
 
 def generate_node(state):
     llm = ChatOpenAI(model="google/gemini-2.0-flash-001", base_url="https://openrouter.ai/api/v1", openai_api_key=os.environ["OPENROUTER_API_KEY"])
     context = "\n\n".join([d.page_content for d in state["documents"]])
-    res = llm.invoke(f"You are a Senior Financial Analyst. Answer using context: {context}\n\nQuestion: {state['question']}")
-    return {"generation": res.content}
+    prompt = f"You are a Senior Financial Analyst. Answer accurately using context: {context}\n\nQuestion: {state['question']}"
+    return {"generation": llm.invoke(prompt).content}
 
 # Build LangGraph
 workflow = StateGraph(AgentState)
@@ -141,34 +98,58 @@ workflow.add_conditional_edges("grade", lambda x: "generate" if x["relevance"] =
 workflow.add_edge("generate", END)
 agent_app = workflow.compile()
 
-# 3. CHAT INTERFACE
-st.title("👨‍💻 Financial RAG Agent")
+# 4. SIDEBAR CONFIGURATION
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    openrouter_key = st.text_input("OpenRouter API Key", type="password")
+    llama_key = st.text_input("LlamaCloud API Key", type="password")
+    
+    if openrouter_key and llama_key:
+        os.environ["OPENROUTER_API_KEY"] = openrouter_key
+        os.environ["LLAMA_CLOUD_API_KEY"] = llama_key
+        st.success("API Keys Ready!")
+
+    st.divider()
+    st.header("📂 Data Source")
+    if st.button("Fetch Latest SEBI Filings"):
+        st.session_state.ipo_links = get_sebi_drhp_list()
+    
+    if "ipo_links" in st.session_state and st.session_state.ipo_links:
+        selected = st.selectbox("Select IPO", options=[i['title'] for i in st.session_state.ipo_links])
+        if st.button("Ingest IPO Data"):
+            target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
+            with st.spinner(f"LlamaParse is extracting tables from {selected}..."):
+                parser = LlamaParse(result_type="markdown", user_prompt="Extract all financial tables precisely.")
+                docs = parser.load_data(target['url'])
+                splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
+                
+                # FIXED: Explicitly passing API Key and Base URL to Embeddings
+                embeddings = OpenAIEmbeddings(
+                    model="openai/text-embedding-3-small", 
+                    openai_api_key=os.environ["OPENROUTER_API_KEY"],
+                    base_url="https://openrouter.ai/api/v1"
+                )
+                
+                vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+                st.session_state.retriever_obj = vectorstore.as_retriever()
+                st.success(f"Ingested {selected}")
+
+# 5. CHAT INTERFACE
 if "messages" not in st.session_state: st.session_state.messages = []
 
-# Handle Ingestion
-if "retriever" in st.session_state and st.session_state.retriever == "loading":
-    with st.spinner(f"Parsing {st.session_state.current_ipo['title']}..."):
-        parser = LlamaParse(result_type="markdown", user_prompt="Extract financial tables accurately.")
-        docs = parser.load_data(st.session_state.current_ipo['url'])
-        splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
-        vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings(base_url="https://openrouter.ai/api/v1", openai_api_key=os.environ["OPENROUTER_API_KEY"]))
-        st.session_state.retriever_obj = vectorstore.as_retriever()
-        st.session_state.retriever = "ready"
-        st.success("Ready for Analysis!")
-
-# Chat History UI
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask about the IPO financial health..."):
+if prompt := st.chat_input("Ask about debt, revenue, or risk factors..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"): st.markdown(prompt)
 
     if "retriever_obj" in st.session_state:
         with st.chat_message("assistant"):
-            result = agent_app.invoke({"question": prompt})
-            ans = result.get("generation", "I couldn't find enough relevant data in the DRHP to answer this accurately.")
-            st.markdown(ans)
-            st.session_state.messages.append({"role": "assistant", "content": ans})
+            with st.spinner("Agent is reasoning..."):
+                result = agent_app.invoke({"question": prompt})
+                ans = result.get("generation", "Agent determined the retrieved data was irrelevant.")
+                st.markdown(ans)
+                st.session_state.messages.append({"role": "assistant", "content": ans})
     else:
         st.error("Please select and ingest an IPO from the sidebar first.")
