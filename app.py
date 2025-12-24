@@ -26,19 +26,36 @@ with st.sidebar:
 
     st.divider()
     st.header("📂 Auto-Fetch SEBI DRHPs")
-    if st.button("Fetch Latest IPOs"):
-        # Auto-Scraping SEBI
-        url = "https://www.sebi.gov.in/sebiweb/ajax/home/getnewslistinfo.jsp"
-        res = requests.post(url, data={'sid': '3', 'ssid': '-1', 'smid': '0', 'nextValue': '1'})
-        soup = BeautifulSoup(res.content, 'html.parser')
-        st.session_state.ipo_links = [{"title": a.text.strip(), "url": a['href']} for a in soup.find_all('a', href=True) if "drhp" in a.text.lower()][:5]
+    
+    # Initialize session state for ipo_links if it doesn't exist
+    if "ipo_links" not in st.session_state:
+        st.session_state.ipo_links = []
 
-    if "ipo_links" in st.session_state:
-        selected_ipo = st.selectbox("Select IPO to Analyze", options=[i['title'] for i in st.session_state.ipo_links])
-        if st.button("Ingest & Analyze"):
+    if st.button("Fetch Latest IPOs"):
+        with st.spinner("Scraping SEBI..."):
+            # Auto-Scraping SEBI
+            url = "https://www.sebi.gov.in/sebiweb/ajax/home/getnewslistinfo.jsp"
+            res = requests.post(url, data={'sid': '3', 'ssid': '-1', 'smid': '0', 'nextValue': '1'})
+            soup = BeautifulSoup(res.content, 'html.parser')
+            
+            # Filter and store in session_state
+            fetched = [{"title": a.text.strip(), "url": a['href']} 
+                       for a in soup.find_all('a', href=True) 
+                       if "drhp" in a.text.lower()]
+            st.session_state.ipo_links = fetched[:5]
+            st.success(f"Found {len(st.session_state.ipo_links)} IPOs!")
+
+    # The selectbox now pulls from session_state, so it remains populated
+    if st.session_state.ipo_links:
+        ipo_titles = [i['title'] for i in st.session_state.ipo_links]
+        selected_ipo = st.selectbox("Select IPO to Analyze", options=ipo_titles)
+        
+        if st.button("Ingest & Analyze Selected IPO"):
             target = next(i for i in st.session_state.ipo_links if i['title'] == selected_ipo)
-            st.session_state.retriever = "loading" # Trigger ingestion
+            st.session_state.retriever = "loading" # Trigger ingestion logic
             st.session_state.current_ipo = target
+    else:
+        st.info("Click 'Fetch Latest IPOs' to see available documents.")
 
 # 2. AGENTIC ENGINE (Self-Correction Loop)
 class AgentState(TypedDict):
