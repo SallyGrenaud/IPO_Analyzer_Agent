@@ -116,23 +116,52 @@ with st.sidebar:
     
     if "ipo_links" in st.session_state and st.session_state.ipo_links:
         selected = st.selectbox("Select IPO", options=[i['title'] for i in st.session_state.ipo_links])
+        # Inside the "Ingest IPO Data" button logic:
         if st.button("Ingest IPO Data"):
-            target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
-            with st.spinner(f"LlamaParse is extracting tables from {selected}..."):
-                parser = LlamaParse(result_type="markdown", user_prompt="Extract all financial tables precisely.")
-                docs = parser.load_data(target['url'])
-                splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
-                
-                # FIXED: Explicitly passing API Key and Base URL to Embeddings
-                embeddings = OpenAIEmbeddings(
-                    model="openai/text-embedding-3-small", 
-                    openai_api_key=os.environ["OPENROUTER_API_KEY"],
-                    base_url="https://openrouter.ai/api/v1"
-                )
-                
-                vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
-                st.session_state.retriever_obj = vectorstore.as_retriever()
-                st.success(f"Ingested {selected}")
+            # 1. Verification Step: Ensure keys exist before proceeding
+            if not os.environ.get("OPENROUTER_API_KEY") or not os.environ.get("LLAMA_CLOUD_API_KEY"):
+                st.error("❌ API Keys are missing! Please enter them in the sidebar first.")
+            else:
+                target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
+                with st.spinner(f"LlamaParse is extracting tables from {selected}..."):
+                    try:
+                        # 2. Re-verify keys are in environment for LlamaParse
+                        os.environ["LLAMA_CLOUD_API_KEY"] = llama_key
+                        
+                        parser = LlamaParse(result_type="markdown")
+                        docs = parser.load_data(target['url'])
+                        
+                        # Validation check for empty docs
+                        if not docs:
+                            st.error("LlamaParse returned no data. Check your LlamaCloud quota.")
+                            st.stop()
+        
+                        splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
+                        
+                        # 3. FIXED: Explicitly pass the key with the 'Bearer' requirement context
+                        # OpenRouter requires this exact setup
+                        embeddings = OpenAIEmbeddings(
+                            model="openai/text-embedding-3-small", 
+                            openai_api_key=os.environ["OPENROUTER_API_KEY"], 
+                            base_url="https://openrouter.ai/api/v1",
+                            # Some versions of LangChain need this to force the correct header
+                            default_headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"}
+                        )
+                        
+                        vectorstore = Chroma.from_documents(
+                            documents=splits, 
+                            embedding=embeddings
+                        )
+                        
+                        st.session_state.retriever_obj = vectorstore.as_retriever()
+                        st.success(f"✅ Ingested {selected}")
+                        
+                    except Exception as e:
+                        # Catching the 401 specifically
+                        if "401" in str(e):
+                            st.error("🔑 OpenRouter Authentication Failed: Check if your API Key is valid and has credits.")
+                        else:
+                            st.error(f"Error: {e}")
 
 # 5. CHAT INTERFACE
 if "messages" not in st.session_state: st.session_state.messages = []
