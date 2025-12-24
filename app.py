@@ -8,67 +8,63 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langgraph.graph import StateGraph, END, START
+from urllib.parse import urljoin
 
 # 1. INITIAL SETUP
 # nest_asyncio.apply()
 st.set_page_config(page_title="IPO Analyst Agent", layout="wide")
 
 # 2. SEBI SCRAPER (Landing Page Aware)
-def get_sebi_drhp_list():
-    """Scrapes SEBI listing page and resolves actual PDF links from landing pages."""
-    # Correct URL for the Public Issues listing
+def get_sebi_drhp_list(limit=5):
     url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    # "Console logging" for the app UI
+    base = "https://www.sebi.gov.in"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
     log_placeholder = st.empty()
-    
+
     try:
-        res = requests.get(url, headers=headers)
-        soup = BeautifulSoup(res.content, 'html.parser')
+        res = requests.get(url, headers=headers, timeout=15)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+
         links = []
-        
-        # Log basic scraping start to console/terminal
-        print(f"Scraping started at: {url}")
-        
-        # Target table rows from SEBI's 'Public Issues' table
-        rows = soup.find_all('tr')
-        for row in rows:
-            # SEBI uses 'points' class for the document titles
-            a_tag = row.find('a', class_='points')
-            if a_tag and "drhp" in a_tag.text.lower():
-                title = a_tag.text.strip()
-                landing_page = a_tag['href']
-                
-                # Resolving the landing page to get the actual PDF
-                lp_res = requests.get(landing_page, headers=headers)
-                lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
-                
-                # Find the direct .pdf link on the filing page
-                pdf_tag = lp_soup.find('a', href=lambda x: x and x.endswith('.pdf'))
-                
-                if pdf_tag:
-                    pdf_url = pdf_tag['href']
-                    if not pdf_url.startswith('http'):
-                        pdf_url = f"https://www.sebi.gov.in{pdf_url}"
-                    
-                    # Console.log equivalent for terminal
-                    print(f"FOUND: {title} -> {pdf_url}")
-                    
-                    links.append({"title": title, "url": pdf_url})
-            
-            if len(links) >= 5: break
-            
-        # UI "Console log" results
+        print("Scraping started")
+
+        for a in soup.select("a.points"):
+            if "drhp" not in a.text.lower():
+                continue
+
+            title = a.text.strip()
+            landing_page = urljoin(base, a.get("href"))
+
+            lp_res = requests.get(landing_page, headers=headers, timeout=15)
+            lp_res.raise_for_status()
+            lp_soup = BeautifulSoup(lp_res.text, "html.parser")
+
+            pdf_url = None
+            for pdf in lp_soup.find_all("a", href=True):
+                href = pdf["href"]
+                if "GetDocument.do" in href or href.endswith(".pdf"):
+                    pdf_url = urljoin(base, href)
+                    break
+
+            if pdf_url:
+                print(f"FOUND: {title} -> {pdf_url}")
+                links.append({"title": title, "url": pdf_url})
+
+            if len(links) == limit:
+                break
+
         if links:
-            log_placeholder.success(f"Scrapped {len(links)} IPOs successfully. Check your terminal for details.")
+            log_placeholder.success(f"Scraped {len(links)} DRHPs successfully")
         else:
-            log_placeholder.warning("No IPOs found. Ensure SEBI has recent DRHP filings.")
-            
+            log_placeholder.warning("No DRHPs found")
+
         return links
+
     except Exception as e:
-        print(f"CRITICAL SCRAPING ERROR: {e}")
-        st.error(f"Scraping Error: {e}")
+        print("SCRAPING FAILED:", e)
+        st.error(str(e))
         return []
 
 # Sidebar for API Keys & Auto-Fetch
