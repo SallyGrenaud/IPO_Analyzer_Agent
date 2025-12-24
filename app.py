@@ -13,6 +13,41 @@ from langgraph.graph import StateGraph, END, START
 # nest_asyncio.apply()
 st.set_page_config(page_title="IPO Analyst Agent", layout="wide")
 
+# 2. SEBI SCRAPER (Landing Page Aware)
+def get_sebi_drhp_list():
+    """Scrapes the SEBI listing page and resolves actual PDF links from landing pages."""
+    url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.content, 'html.parser')
+        links = []
+        
+        # Target table rows from SEBI's 'Public Issues' table
+        rows = soup.find_all('tr')
+        for row in rows:
+            a_tag = row.find('a', class_='points')
+            if a_tag and "drhp" in a_tag.text.lower():
+                title = a_tag.text.strip()
+                landing_page = a_tag['href']
+                
+                # SEBI PDFs are inside a landing page; we must find the direct .pdf link
+                lp_res = requests.get(landing_page, headers=headers)
+                lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
+                pdf_tag = lp_soup.find('a', href=lambda x: x and x.endswith('.pdf'))
+                
+                if pdf_tag:
+                    pdf_url = pdf_tag['href']
+                    if not pdf_url.startswith('http'):
+                        pdf_url = f"https://www.sebi.gov.in{pdf_url}"
+                    links.append({"title": title, "url": pdf_url})
+            if len(links) >= 5: break
+        return links
+    except Exception as e:
+        st.error(f"Scraping Error: {e}")
+        return []
+
 # Sidebar for API Keys & Auto-Fetch
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -27,35 +62,23 @@ with st.sidebar:
     st.divider()
     st.header("📂 Auto-Fetch SEBI DRHPs")
     
-    # Initialize session state for ipo_links if it doesn't exist
-    if "ipo_links" not in st.session_state:
-        st.session_state.ipo_links = []
-
-    if st.button("Fetch Latest IPOs"):
-        with st.spinner("Scraping SEBI..."):
-            # Auto-Scraping SEBI
-            url = "https://www.sebi.gov.in/sebiweb/ajax/home/getnewslistinfo.jsp"
-            res = requests.post(url, data={'sid': '3', 'ssid': '-1', 'smid': '0', 'nextValue': '1'})
-            soup = BeautifulSoup(res.content, 'html.parser')
-            
-            # Filter and store in session_state
-            fetched = [{"title": a.text.strip(), "url": a['href']} 
-                       for a in soup.find_all('a', href=True) 
-                       if "drhp" in a.text.lower()]
-            st.session_state.ipo_links = fetched[:5]
-            st.success(f"Found {len(st.session_state.ipo_links)} IPOs!")
-
-    # The selectbox now pulls from session_state, so it remains populated
-    if st.session_state.ipo_links:
-        ipo_titles = [i['title'] for i in st.session_state.ipo_links]
-        selected_ipo = st.selectbox("Select IPO to Analyze", options=ipo_titles)
-        
-        if st.button("Ingest & Analyze Selected IPO"):
-            target = next(i for i in st.session_state.ipo_links if i['title'] == selected_ipo)
-            st.session_state.retriever = "loading" # Trigger ingestion logic
-            st.session_state.current_ipo = target
-    else:
-        st.info("Click 'Fetch Latest IPOs' to see available documents.")
+    if st.button("Fetch Latest SEBI Filings"):
+        st.session_state.ipo_links = get_sebi_drhp_list()
+    
+    if "ipo_links" in st.session_state and st.session_state.ipo_links:
+        selected = st.selectbox("Select IPO", options=[i['title'] for i in st.session_state.ipo_links])
+        if st.button("Ingest IPO Data"):
+            target = next(i for i in st.session_state.ipo_links if i['title'] == selected)
+            with st.spinner("LlamaParse is extracting financial tables..."):
+                parser = LlamaParse(result_type="markdown", user_prompt="Extract all financial tables precisely.")
+                docs = parser.load_data(target['url'])
+                splits = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200).create_documents([d.text for d in docs])
+                vectorstore = Chroma.from_documents(
+                    documents=splits, 
+                    embedding=OpenAIEmbeddings(model="openai/text-embedding-3-small", base_url="https://openrouter.ai/api/v1")
+                )
+                st.session_state.retriever = vectorstore.as_retriever()
+                st.success(f"Ingested {selected}")
 
 # 2. AGENTIC ENGINE (Self-Correction Loop)
 class AgentState(TypedDict):
