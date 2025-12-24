@@ -63,10 +63,16 @@ def retrieve_node(state):
 
 def grade_node(state):
     llm = get_llm()
-    context = "\n".join([d.page_content for d in state["documents"]])
-    prompt = f"Does this context answer: '{state['question']}'? Reply ONLY 'yes' or 'no'. Context: {context}"
-    score = llm.invoke(prompt).content.lower()
-    return {"relevance": "yes" if "yes" in score else "no"}
+    doc_txt = "\n".join([d.page_content for d in state["documents"]])
+    # Change: Ask if the context provides financial data to evaluate an IPO
+    prompt = f"""
+    Context: {doc_txt}
+    Question: {state['question']}
+    Does the context provide financial or business information relevant to the company mentioned in the question? 
+    Respond ONLY 'yes' or 'no'.
+    """
+    check = llm.invoke(prompt)
+    return {"relevance": "yes" if "yes" in check.content.lower() else "no"}
 
 def generate_node(state):
     llm = get_llm()
