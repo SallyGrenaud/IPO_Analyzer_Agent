@@ -15,56 +15,64 @@ from urllib.parse import urljoin
 st.set_page_config(page_title="IPO Analyst Agent", layout="wide")
 
 # 2. SEBI SCRAPER (Landing Page Aware)
-def get_sebi_drhp_list(limit=5):
+def get_sebi_drhp_list():
+    """Scrapes SEBI listing page and resolves actual PDF links from intermediate landing pages."""
     url = "https://www.sebi.gov.in/sebiweb/home/HomeAction.do?doListing=yes&sid=3&ssid=15&smid=10"
-    base = "https://www.sebi.gov.in"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    log_placeholder = st.empty()
-
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
     try:
-        res = requests.get(url, headers=headers, timeout=15)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-
+        # Step 1: Get the main listing table
+        res = requests.get(url, headers=headers)
+        soup = BeautifulSoup(res.content, 'html.parser')
         links = []
-        print("Scraping started")
+        
+        print(f"--- Console Log: Scraping started at {url} ---")
+        
+        # Rows in the SEBI table
+        rows = soup.find_all('tr')
+        for row in rows:
+            a_tag = row.find('a', class_='points')
+            if a_tag and "drhp" in a_tag.text.lower():
+                title = a_tag.text.strip()
+                landing_page_url = a_tag['href']
+                
+                # Step 2: Visit the landing page to find the embedded PDF
+                print(f"--- Console Log: Entering Landing Page: {title} ---")
+                lp_res = requests.get(landing_page_url, headers=headers)
+                lp_soup = BeautifulSoup(lp_res.content, 'html.parser')
+                
+                # SEBI embeds the PDF in an iframe. We look for 'iframe' or 'a' tags
+                iframe = lp_soup.find('iframe')
+                pdf_url = None
+                
+                if iframe and 'src' in iframe.attrs:
+                    src = iframe['src']
+                    # Handle the common 'viewer.html?file=' format
+                    if 'file=' in src:
+                        pdf_url = src.split('file=')[-1]
+                    else:
+                        pdf_url = src
+                
+                # Fallback: Look for any direct PDF link on the page
+                if not pdf_url:
+                    pdf_tag = lp_soup.find('a', href=lambda x: x and x.endswith('.pdf'))
+                    if pdf_tag:
+                        pdf_url = pdf_tag['href']
 
-        for a in soup.select("a.points"):
-            if "drhp" not in a.text.lower():
-                continue
-
-            title = a.text.strip()
-            landing_page = urljoin(base, a.get("href"))
-
-            lp_res = requests.get(landing_page, headers=headers, timeout=15)
-            lp_res.raise_for_status()
-            lp_soup = BeautifulSoup(lp_res.text, "html.parser")
-
-            pdf_url = None
-            for pdf in lp_soup.find_all("a", href=True):
-                href = pdf["href"]
-                if "GetDocument.do" in href or href.endswith(".pdf"):
-                    pdf_url = urljoin(base, href)
-                    break
-
-            if pdf_url:
-                print(f"FOUND: {title} -> {pdf_url}")
-                links.append({"title": title, "url": pdf_url})
-
-            if len(links) == limit:
-                break
-
-        if links:
-            log_placeholder.success(f"Scraped {len(links)} DRHPs successfully")
-        else:
-            log_placeholder.warning("No DRHPs found")
-
+                if pdf_url:
+                    # Clean the URL (handle relative paths)
+                    if not pdf_url.startswith('http'):
+                        pdf_url = f"https://www.sebi.gov.in{pdf_url}"
+                    
+                    print(f"--- Console Log: SUCCESS! PDF Link Extracted: {pdf_url} ---")
+                    links.append({"title": title, "url": pdf_url})
+            
+            if len(links) >= 5: break # Limit for performance
+            
         return links
-
     except Exception as e:
-        print("SCRAPING FAILED:", e)
-        st.error(str(e))
+        print(f"--- Console Log: SCRAPING ERROR: {e} ---")
+        st.error(f"Scraping Error: {e}")
         return []
 
 # Sidebar for API Keys & Auto-Fetch
