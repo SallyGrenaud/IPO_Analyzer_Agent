@@ -1,4 +1,4 @@
-# 📈 IPO Analyst Pro: Agentic RAG for SEBI Filings
+# 📈 IPO Analyzer: Agentic RAG for SEBI Filings
 
 A high-performance, **Agentic RAG (Retrieval-Augmented Generation)** system designed to automate the analysis of Indian IPO Draft Red Herring Prospectuses (DRHPs). This tool scrapes live data from SEBI, processes 300+ page financial documents using hybrid parsing, and provides a self-correcting AI agent interface for investment research.
 
